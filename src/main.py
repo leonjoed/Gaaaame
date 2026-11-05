@@ -4,10 +4,11 @@ import pygame, asyncio, time
 
 # ===================== TUNING (alles hier anpassen) =====================
 SCREEN_W, SCREEN_H, FPS, TILE = 960, 540, 60, 32
-MOVE  = dict(max_speed=4.2, accel=0.9, decel=1.1, air_accel=0.6, air_decel=0.35)
-JUMP  = dict(velocity=-9.1, gravity=0.36, fall_gravity=0.52, max_fall=9.75,
-             cut_mult=0.45, coyote=6, buffer=7, double_jump_vel=-8.0, air_jumps=1)
-WALL  = dict(slide_speed=1.8, jump_vx=5.4, jump_vy=-8.2, lock_frames=9)
+MOVE  = dict(max_speed=4.2, accel=0.6, decel=0.5, air_accel=0.42, air_decel=0.22)  # ~0,12 s bis Vollspeed
+JUMP  = dict(velocity=-8.6, gravity=0.32, fall_gravity=0.36, max_fall=7.5,
+             cut_mult=0.5, coyote=8, buffer=9, double_jump_vel=-7.0, air_jumps=1,
+             apex_threshold=1.5, apex_mult=0.5)  # Scheitel: halbe Schwerkraft bei gehaltenem Sprung
+WALL  = dict(slide_speed=1.6, jump_vx=4.6, jump_vy=-7.4, lock_frames=10, stick_frames=8)
 DASH  = dict(speed=13.0, frames=9, cooldown=40, iframes=10)
 DROP  = dict(frames=12)
 BLASTER = dict(cooldown=7, speed=11.0, damage=6, knock=2.0, life=60, radius=3)
@@ -21,34 +22,34 @@ WALKER = dict(hp=30, w=26, h=30, speed=1.0, charge_speed=3.3, sight=180, contact
 FLYER  = dict(hp=20, r=13, keep_dist=200, speed=1.7, shoot_cd=110, bullet_speed=2.7, bullet_dmg=10, sight=420, weight=1.4)
 BRUTE  = dict(hp=90, w=40, h=56, speed=0.6, sight=200, range=60, windup=50, strike=10, recover=55,
               damage=30, contact=12, weight=0.35)
-CAMERA = dict(lerp=0.12, lookahead=90)
+CAMERA = dict(lerp=0.08, lookahead=130, look_lerp=0.04, vlerp=0.06)
 COLORS = dict(bg=(236, 240, 244), tile=(70, 80, 98), oneway=(130, 145, 170), spike=(200, 60, 60),
               player=(25, 25, 30), teal=(0, 190, 180), walker=(220, 120, 40), flyer=(140, 80, 200),
               brute=(90, 110, 70), enemy_shot=(230, 50, 90), flag=(240, 190, 30), text=(30, 30, 40))
 
 LEVEL = [
-"................................................................................................................................",
-"................................................................................................................................",
-"..........................................................#.....#...............................................................",
-"..........................................................#.....#...............................................................",
-"..........................................................#.....#.........................f.....................................",
-"..........................................................#.....#...............................................................",
-"..........................................................#.....#...............................................................",
-"....................................f.....................#.....#.................---------............................f.......",
-"..........................................................#.....#.......................................................#.......",
-"..........................................------..........#.....#.......................................................#.......",
-"..........................................................#.....#.........######......................................#.......",
-"..........................................................#.....#.........#....#.......................................#....E..",
-"...............................------.....................#.....#.........#....#...................------..............#....#..",
-"..........................................................#.....#.........#....#.......................................#....#..",
-".....................................####.................#.....#.........#....#.......#.......................b.......#....#..",
-"...............................####..####.................#.....#.........#....#.......#...............................#....#..",
-".P.............w.......####....####..####......C.....w....#.................w.........#.......w......b..........######......#..",
-"######################.####....####..####....##########...#.....##############...#######################...###################..",
-"######################.####^^^^####..####....##########^^^#.....##############...#######################^^^###################..",
-"######################.##############################################################################################...........",
+"...............................................................................................................................#",
+"...............................................................................................................................#",
+"......................................................#........................................................................#",
+"......................................................#...##...................................................................#",
+"......................................................#...##...................................................................#",
+"......................................................#.--##...................................................................#",
+"......................................................#...##...................................................................#",
+"........................................f.............#...##...................................................................#",
+"......................................................#--.##...................................................................#",
+"......................................------..........#...##..................f......................f.........................#",
+"......................................................#...##...................................................................#",
+"......................................................#.--##...................................................................#",
+"..............................------..................#...##..............---------................------......................#",
+"......................................................#...##...................................................................#",
+"................................###...................#--.##............................#......................................#",
+".............................######.......................##............................#..............................###.....#",
+".P.............w..........#########............C..........##......w.................b...#.....w.............b.......######..E..#",
+"######################..###########....###############################...###########################...#########..##############",
+"######################..###########^^^^###############################...###########################^^^#########..##############",
+"######################..##############################################...#######################################..##############",
 ]
-# Gaps: col 22, cols 42-45, cols 78-80 (Abgrund), cols 125+ unten offen.
+SIGNS = [(50, 16, ["Wandsprung: an die Wand springen,", "dann Sprung drücken. Oder: Plattformen", "im Schacht + Doppelsprung"])]
 # ========================================================================
 
 BASE = os.path.dirname(sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__))
@@ -132,7 +133,7 @@ class Player(Body):
         s.jump_held = False; s.dash_dir = 1
     def update(s, g, inp):
         lv = g.level
-        mx = (1 if inp.held("right") else 0) - (1 if inp.held("left") else 0)
+        mx = inp.axis(); md = (mx > 0) - (mx < 0)
         for k in ("dash_cd", "inv", "wall_lock", "drop_t", "shot_cd", "combo_t"):
             setattr(s, k, max(0, getattr(s, k) - 1))
         if inp.pressed("jump"): s.buffer = JUMP["buffer"]
@@ -140,25 +141,28 @@ class Player(Body):
         # Dash
         if inp.pressed("dash") and s.dash_cd == 0 and s.dash_t == 0:
             s.dash_t = DASH["frames"]; s.dash_cd = DASH["cooldown"]; s.inv = max(s.inv, DASH["iframes"])
-            s.dash_dir = mx if mx else s.face; s.face = s.dash_dir; g.fx_burst(s.cx, s.cy, COLORS["teal"], 6)
+            s.dash_dir = md if md else s.face; s.face = s.dash_dir; g.fx_burst(s.cx, s.cy, COLORS["teal"], 6)
         if s.dash_t > 0:
             s.dash_t -= 1; s.vx = DASH["speed"] * s.dash_dir; s.vy = 0
             if g.frame % 2 == 0: g.ghosts.append([s.x, s.y, s.face, 14])
         else:
-            if mx: s.face = mx if s.melee_t == 0 else s.face
+            if md: s.face = md if s.melee_t == 0 else s.face
             if s.wall_lock == 0:
                 tgt = mx * MOVE["max_speed"]
                 a = (MOVE["accel"] if mx else MOVE["decel"]) if s.ground else (MOVE["air_accel"] if mx else MOVE["air_decel"])
                 s.vx += clamp(tgt - s.vx, -a, a)
-            grav = JUMP["gravity"] if (s.vy < 0 and inp.held("jump")) else JUMP["fall_gravity"]
+            grav = JUMP["gravity"] if s.vy < 0 else JUMP["fall_gravity"]
+            if inp.held("jump") and abs(s.vy) < JUMP["apex_threshold"]: grav *= JUMP["apex_mult"]
             s.vy = min(s.vy + grav, JUMP["max_fall"])
             if s.vy < 0 and not inp.held("jump") and s.jump_held: s.vy *= JUMP["cut_mult"]; s.jump_held = False
             # Wandkontakt
             s.wall = 0
             if not s.ground:
                 for d in (-1, 1):
-                    p = s.rect.move(d * 2, 0)
-                    if lv.rect_solid(p) and mx == d: s.wall = d
+                    if lv.rect_solid(s.rect.move(d * 2, 0)):
+                        if md == d: s.wall = d; s.wall_stick = WALL["stick_frames"]
+                        elif getattr(s, "wall_stick", 0) > 0 and s.vy >= 0:  # weiche Wandhaftung
+                            s.wall = d; s.wall_stick -= 1; s.vx = 0
             if s.wall and s.vy > WALL["slide_speed"]: s.vy = WALL["slide_speed"]
             # Springen / Durchfallen
             if s.buffer:
@@ -320,9 +324,13 @@ class Input:
            "restart": (pygame.K_r,), "help": (pygame.K_h,), "quit": (pygame.K_ESCAPE,)}
     def __init__(s): s.cur = set(); s.prev = set(); s.joy = None
     def held(s, a): return a in s.cur
+    def axis(s):
+        a = getattr(s, "ax", None)
+        if a is not None and abs(a) > 0.01: return clamp(a, -1, 1)
+        return (1 if "right" in s.cur else 0) - (1 if "left" in s.cur else 0)
     def pressed(s, a): return a in s.cur and a not in s.prev
     def poll(s):
-        s.prev = s.cur; s.cur = set(); keys = pygame.key.get_pressed(); mb = pygame.mouse.get_pressed()
+        s.prev = s.cur; s.cur = set(); s.ax = None; keys = pygame.key.get_pressed(); mb = pygame.mouse.get_pressed()
         for a, ks in s.MAP.items():
             if any(keys[k] for k in ks): s.cur.add(a)
         if mb[0]: s.cur.add("shoot")
@@ -330,7 +338,7 @@ class Input:
         if s.joy is None and pygame.joystick.get_count(): s.joy = pygame.joystick.Joystick(0)
         if s.joy:
             try:
-                ax = s.joy.get_axis(0); ay = s.joy.get_axis(1); hx, hy = s.joy.get_hat(0) if s.joy.get_numhats() else (0, 0)
+                ax = s.joy.get_axis(0); s.ax = 0 if abs(ax) < 0.15 else (ax - math.copysign(0.15, ax)) / 0.85; ay = s.joy.get_axis(1); hx, hy = s.joy.get_hat(0) if s.joy.get_numhats() else (0, 0)
                 if ax < -0.4 or hx < 0: s.cur.add("left")
                 if ax > 0.4 or hx > 0: s.cur.add("right")
                 if ay > 0.5 or hy < 0: s.cur.add("down")
@@ -427,9 +435,9 @@ class Game:
         e = s.level.end
         if e and abs(p.cx - e[0]) < 24 and abs(p.y + p.h - e[1]) < 50: s.won = True
         s.update_fx()
-        look = p.face * CAMERA["lookahead"] + p.vx * 6
+        s.look = getattr(s, "look", 0.0); s.look += (p.face * CAMERA["lookahead"] - s.look) * CAMERA["look_lerp"]; look = s.look
         tx = clamp(p.cx + look - SCREEN_W / 2, 0, s.level.pw - SCREEN_W); ty = clamp(p.cy - SCREEN_H * 0.55, 0, s.level.ph - SCREEN_H)
-        s.cam[0] += (tx - s.cam[0]) * CAMERA["lerp"]; s.cam[1] += (ty - s.cam[1]) * CAMERA["lerp"]
+        s.cam[0] += (tx - s.cam[0]) * CAMERA["lerp"]; s.cam[1] += (ty - s.cam[1]) * CAMERA["vlerp"]
     def update_fx(s):
         for f in s.fx: f[0] += f[2]; f[1] += f[3]; f[3] += 0.2; f[4] -= 1
         s.fx = [f for f in s.fx if f[4] > 0]
@@ -454,6 +462,11 @@ class Game:
                 elif ch == "^":
                     for k in range(4): pygame.draw.polygon(sc, COLORS["spike"], [(x + k * 8, y + TILE), (x + k * 8 + 4, y + 14), (x + k * 8 + 8, y + TILE)])
         for c in lv.checkpoints: s.draw_flag(c[0] - ox, c[1] - oy, COLORS["teal"] if c[2] else (160, 160, 160), "C")
+        for sx, sy, lines in SIGNS:
+            bx = sx * TILE - ox - 40; by = sy * TILE - oy - 150; w = 280
+            pygame.draw.line(sc, (120, 100, 60), (bx + 40, by + 60), (bx + 40, sy * TILE - oy + 32), 3)
+            pygame.draw.rect(sc, (255, 250, 220), (bx, by, w, 62), border_radius=4); pygame.draw.rect(sc, (120, 100, 60), (bx, by, w, 62), 2, border_radius=4)
+            for i, l in enumerate(lines): sc.blit(s.small.render(l, True, COLORS["text"]), (bx + 8, by + 5 + i * 18))
         if lv.end: s.draw_flag(lv.end[0] - ox, lv.end[1] - oy, COLORS["flag"], "Ziel")
         for e in s.enemies: s.draw_enemy(e, ox, oy)
         for gh in s.ghosts: s.draw_stick(gh[0] - ox, gh[1] - oy, gh[2], 0, "dash", alpha=gh[3] * 12, color=COLORS["teal"])
@@ -564,29 +577,36 @@ class Game:
 
 
 # ---------------- Touch-Steuerung (Web/Handy) ----------------
-BTN_R = 46
-TOUCH_BTNS = {  # Name: (x, y, Radius, Aktion, Label) in Spielkoordinaten 960x540
-    "left": (80, 440, BTN_R, "left", "<"), "right": (200, 440, BTN_R, "right", ">"), "down": (140, 505, 30, "down", "v"),
-    "jump": (880, 450, BTN_R + 4, "jump", "Sprung"), "dash": (780, 490, 38, "dash", "Dash"),
-    "shoot": (880, 340, 40, "shoot", "Schuss"), "melee": (770, 390, 38, "melee", "Hieb"),
-    "restart": (420, 24, 18, "restart", "R"), "help": (470, 24, 18, "help", "H"),
+STICK = dict(radius=80, deadzone=0.15, down=0.6)  # schwebender Joystick links
+TOUCH_BTNS = {  # Name: (x, y, Radius, Aktion, Label) in Spielkoordinaten 960x540; Trefferflaeche = Radius * hit
+    "jump": (880, 460, 62, "jump", "Sprung"), "dash": (750, 480, 50, "dash", "Dash"),
+    "shoot": (880, 320, 52, "shoot", "Schuss"), "melee": (755, 360, 50, "melee", "Hieb"),
+    "restart": (430, 24, 20, "restart", "R"), "help": (480, 24, 20, "help", "H"),
 }
+BTN_HIT = 1.35
 class TouchInput(Input):
-    def __init__(s): super().__init__(); s.fingers = {}; s.touch_seen = False
+    def __init__(s): super().__init__(); s.fingers = {}; s.touch_seen = False; s.stick_id = None; s.stick_o = None; s.stick_v = (0.0, 0.0)
     def handle(s, ev):
-        if ev.type in (pygame.FINGERDOWN, pygame.FINGERMOTION):
-            s.touch_seen = True; s.fingers[ev.finger_id] = (ev.x * SCREEN_W, ev.y * SCREEN_H)
-        elif ev.type == pygame.FINGERUP: s.fingers.pop(ev.finger_id, None)
+        if ev.type not in (pygame.FINGERDOWN, pygame.FINGERMOTION, pygame.FINGERUP): return
+        x, y = ev.x * SCREEN_W, ev.y * SCREEN_H; fid = ev.finger_id
+        if ev.type == pygame.FINGERUP:
+            s.fingers.pop(fid, None)
+            if fid == s.stick_id: s.stick_id = None; s.stick_o = None; s.stick_v = (0.0, 0.0)
+            return
+        s.touch_seen = True
+        if ev.type == pygame.FINGERDOWN and s.stick_id is None and x < SCREEN_W * 0.5 and y > 60:
+            s.stick_id = fid; s.stick_o = (x, y)
+        if fid == s.stick_id:
+            dx, dy = x - s.stick_o[0], y - s.stick_o[1]; r = STICK["radius"]; d = math.hypot(dx, dy)
+            if d > r: dx, dy = dx / d * r, dy / d * r
+            s.stick_v = (dx / r, dy / r)
+        else: s.fingers[fid] = (x, y)
     def touch_actions(s):
         acts = set()
         for fx, fy in s.fingers.values():
-            if fx < SCREEN_W * 0.35 and fy > SCREEN_H * 0.55:  # linkes Feld: grob links/rechts/runter
-                if fy > 480 and 100 < fx < 180: acts.add("down")
-                elif fx < 140: acts.add("left")
-                else: acts.add("right")
-                continue
             for name, (bx, by, r, a, _) in TOUCH_BTNS.items():
-                if math.hypot(fx - bx, fy - by) < r * 1.25: acts.add(a)
+                if math.hypot(fx - bx, fy - by) < r * BTN_HIT: acts.add(a)
+        if s.stick_v[1] > STICK["down"]: acts.add("down")  # nach oben springt NICHT
         return acts
     def poll(s):
         super().poll()
@@ -596,13 +616,19 @@ class TouchInput(Input):
             if keys[pygame.K_j]: s.cur.add("shoot")
             if keys[pygame.K_k]: s.cur.add("melee")
             s.cur |= s.touch_actions()
+            vx = s.stick_v[0]; dz = STICK["deadzone"]
+            if abs(vx) > dz: s.ax = (vx - math.copysign(dz, vx)) / (1 - dz)
 def draw_touch(sc, inp, font):
     if not getattr(inp, "touch_seen", False): return
     ov = pygame.Surface((SCREEN_W, SCREEN_H), pygame.SRCALPHA)
-    for name, (bx, by, r, a, lab) in TOUCH_BTNS.items():
+    o = inp.stick_o or (140, 420); r = STICK["radius"]
+    pygame.draw.circle(ov, col((40, 40, 60), 60), o, r); pygame.draw.circle(ov, col((255, 255, 255), 120), o, r, 2)
+    k = (o[0] + inp.stick_v[0] * r, o[1] + inp.stick_v[1] * r)
+    pygame.draw.circle(ov, col((0, 150, 140), 170 if inp.stick_o else 90), (int(k[0]), int(k[1])), 34)
+    for name, (bx, by, br, a, lab) in TOUCH_BTNS.items():
         on = a in inp.cur
-        pygame.draw.circle(ov, col((0, 150, 140) if on else (40, 40, 60), 150 if on else 80), (bx, by), r)
-        pygame.draw.circle(ov, col((255, 255, 255), 140), (bx, by), r, 2)
+        pygame.draw.circle(ov, col((0, 150, 140) if on else (40, 40, 60), 150 if on else 80), (bx, by), br)
+        pygame.draw.circle(ov, col((255, 255, 255), 140), (bx, by), br, 2)
         t = font.render(lab, True, (255, 255, 255)); ov.blit(t, (bx - t.get_width() / 2, by - t.get_height() / 2))
     sc.blit(ov, (0, 0))
 def is_portrait():
