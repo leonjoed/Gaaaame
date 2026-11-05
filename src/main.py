@@ -19,7 +19,8 @@ MELEE = [dict(damage=12, knock=4.0, active=(4, 9), total=16, lunge=3.0, reach=34
 MELEE_COMBO_WINDOW = 14
 PLAYER = dict(hp=100, w=20, h=44, iframes=60, hurt_knock=6.0, fall_damage=15, spike_damage=20)
 WALKER = dict(hp=30, w=26, h=30, speed=1.0, charge_speed=3.3, sight=180, contact=10, weight=1.0)
-FLYER  = dict(hp=20, r=13, keep_dist=200, speed=1.7, shoot_cd=110, bullet_speed=2.7, bullet_dmg=10, sight=420, weight=1.4)
+FLYER  = dict(hp=20, r=13, keep_dist=200, speed=1.7, shoot_cd=110, bullet_speed=2.7, bullet_dmg=10, sight=420, weight=1.4,
+              bob=8, rise=32, hover_frames=170, rise_frames=55, descend_frames=45)
 BRUTE  = dict(hp=90, w=40, h=56, speed=0.6, sight=200, range=60, windup=50, strike=10, recover=55,
               damage=30, contact=12, weight=0.35)
 CAMERA = dict(lerp=0.08, lookahead=130, look_lerp=0.04, vlerp=0.06)
@@ -260,29 +261,71 @@ class Walker(Enemy):
 
 class Flyer(Enemy):
     kind = "f"; color = COLORS["flyer"]; weight = FLYER["weight"]
-    def __init__(s, x, y): super().__init__(x, y - 10, FLYER["r"] * 2, FLYER["r"] * 2, FLYER["hp"]); s.cd = random.randint(30, 90); s.t = random.random() * 6; s.home = (x, y - 40)
+    def __init__(s, x, y):
+        super().__init__(x, y - 10, FLYER["r"] * 2, FLYER["r"] * 2, FLYER["hp"])
+        s.cd = FLYER["shoot_cd"]; s.t = random.random() * 6; s.home = (s.cx, s.cy)
+        s.phase, s.phase_t, s.anchor, s.side = "descend", 1, None, -1
+    def open_y(s, lv, cy):
+        # Blockierte Hoehe nach unten schieben, nicht in eine hoehere Nische ausweichen.
+        def blocked(y):
+            return lv.rect_solid(pygame.Rect(int(s.cx - s.w / 2), int(y - s.h / 2), s.w, s.h))
+        if not blocked(cy): return cy
+        for dy in range(4, 180, 4):
+            if not blocked(cy + dy): return cy + dy
+        return cy
     def update(s, g):
         p = g.player; s.flash = max(0, s.flash - 1); s.t += 0.05
-        dx, dy = p.cx - s.cx, p.cy - s.cy; d = math.hypot(dx, dy) or 1
-        if s.stun: s.stun -= 1; s.vx *= 0.9; s.vy *= 0.9
+        dx = p.cx - s.cx; d = math.hypot(dx, p.cy - s.cy) or 1
+        chest = p.y + 17  # gleiche Hoehe wie Player.muzzle
+        if p.ground or s.anchor is None or chest > s.anchor:
+            s.anchor = chest  # Sprung nach oben nicht verfolgen
+        if s.stun:
+            s.stun -= 1; s.vx *= 0.9; s.vy *= 0.9
         elif d < FLYER["sight"]:
             s.face = 1 if dx > 0 else -1
-            want = (d - FLYER["keep_dist"]) / d
-            tx, ty = dx * want, (dy - 90) * 0.5
-            s.vx += clamp(tx * 0.02, -0.3, 0.3); s.vy += clamp(ty * 0.02 + math.sin(s.t) * 0.05, -0.3, 0.3)
-            s.cd -= 1
-            if s.cd <= 0:
-                s.cd = FLYER["shoot_cd"]; v = FLYER["bullet_speed"]
-                g.shots.append(Shot(s.cx, s.cy, dx / d * v, dy / d * v, FLYER["bullet_dmg"], 4, 200, 6, False))
+            if abs(dx) > 12: s.side = 1 if s.cx >= p.cx else -1
+            goal_x = p.cx + s.side * FLYER["keep_dist"]
+            stacked = abs(dx) < (s.w + p.w) / 2 + 14
+            if stacked: goal_x = p.cx + s.side * max(FLYER["keep_dist"], 96); s.vx += s.side * 0.35
+            s.phase_t -= 1
+            if s.phase == "rise":
+                target = s.anchor - FLYER["rise"]
+                if s.phase_t <= 0: s.phase, s.phase_t = "descend", FLYER["descend_frames"]
+            elif s.phase == "descend":
+                target = s.anchor
+                if abs(s.cy - s.anchor) < 8:  # Uhr erst auf Brusthoehe starten, nicht schon im Anflug
+                    s.phase, s.phase_t, s.cd = "hover", FLYER["hover_frames"], FLYER["shoot_cd"]
+            else:
+                target = s.anchor + math.sin(s.t) * FLYER["bob"]
+                if s.phase_t <= 0: s.phase, s.phase_t = "rise", FLYER["rise_frames"]
+            if stacked: target = min(target, p.y - s.h / 2 - 6)  # nicht in den Koerper sinken
+            target = s.open_y(g.level, target)
+            s.vx += clamp((goal_x - s.cx) * 0.02, -0.3, 0.3)
+            s.vy += clamp((target - s.cy) * 0.05, -0.3, 0.3)
+            aligned = s.phase == "hover" and abs(s.cy - s.anchor) <= FLYER["bob"] + 4 and abs(dx) > 48
+            if aligned:
+                s.cd -= 1
+                if s.cd <= 0:
+                    s.cd = FLYER["shoot_cd"]; v = FLYER["bullet_speed"]
+                    aim_y = clamp(chest - s.cy, -6, 6); ad = math.hypot(dx, aim_y) or 1
+                    g.shots.append(Shot(s.cx, s.cy, dx / ad * v, aim_y / ad * v, FLYER["bullet_dmg"], 4, 200, 6, False))
+            else:
+                s.cd = max(s.cd, 28)  # Warnring nur auf der Schusslinie
         else:
-            s.vx += clamp((s.home[0] - s.cx) * 0.01, -0.1, 0.1); s.vy += clamp((s.home[1] - s.cy) * 0.01 + math.sin(s.t) * 0.04, -0.1, 0.1)
+            s.vx += clamp((s.home[0] - s.cx) * 0.01, -0.1, 0.1)
+            s.vy += clamp((s.home[1] - s.cy) * 0.01 + math.sin(s.t) * 0.04, -0.1, 0.1)
         sp = math.hypot(s.vx, s.vy)
         if sp > FLYER["speed"]: s.vx *= FLYER["speed"] / sp; s.vy *= FLYER["speed"] / sp
         s.x += s.vx
         if g.level.rect_solid(s.rect): s.x -= s.vx; s.vx = -s.vx * 0.5
         s.y += s.vy
         if g.level.rect_solid(s.rect): s.y -= s.vy; s.vy = -s.vy * 0.5
-        if s.rect.colliderect(p.rect): g.hurt_player(8, 1 if p.cx > s.cx else -1)
+        if s.rect.colliderect(p.rect):
+            push = (s.w + p.w) / 2 + 6 - abs(s.cx - p.cx)
+            if push > 0 and abs(s.cy - p.cy) < (s.h + p.h) / 2:
+                s.x += math.copysign(push, s.side or 1)
+                if g.level.rect_solid(s.rect): s.x -= math.copysign(push, s.side or 1)
+            if s.rect.colliderect(p.rect): g.hurt_player(8, 1 if p.cx > s.cx else -1)
 
 class Brute(Enemy):
     kind = "b"; color = COLORS["brute"]; weight = BRUTE["weight"]
