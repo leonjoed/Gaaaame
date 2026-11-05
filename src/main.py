@@ -1,25 +1,25 @@
 # Mechanik-Prototyp - Strichmaennchen-Roguevania-Testbett (Python + pygame, keine Assets)
 import os, sys, math, random, traceback
-import pygame, asyncio
+import pygame, asyncio, time
 
 # ===================== TUNING (alles hier anpassen) =====================
 SCREEN_W, SCREEN_H, FPS, TILE = 960, 540, 60, 32
-MOVE  = dict(max_speed=5.2, accel=0.9, decel=1.1, air_accel=0.6, air_decel=0.35)
-JUMP  = dict(velocity=-11.0, gravity=0.55, fall_gravity=0.8, max_fall=13.0,
-             cut_mult=0.45, coyote=6, buffer=7, double_jump_vel=-9.8, air_jumps=1)
-WALL  = dict(slide_speed=2.2, jump_vx=6.5, jump_vy=-10.0, lock_frames=9)
+MOVE  = dict(max_speed=4.2, accel=0.9, decel=1.1, air_accel=0.6, air_decel=0.35)
+JUMP  = dict(velocity=-9.1, gravity=0.36, fall_gravity=0.52, max_fall=9.75,
+             cut_mult=0.45, coyote=6, buffer=7, double_jump_vel=-8.0, air_jumps=1)
+WALL  = dict(slide_speed=1.8, jump_vx=5.4, jump_vy=-8.2, lock_frames=9)
 DASH  = dict(speed=13.0, frames=9, cooldown=40, iframes=10)
 DROP  = dict(frames=12)
-BLASTER = dict(cooldown=7, speed=13.0, damage=6, knock=2.0, life=60, radius=3)
-CHARGED = dict(hold_frames=36, speed=11.0, damage=30, knock=9.0, life=80, radius=8, pierce=True)
+BLASTER = dict(cooldown=7, speed=11.0, damage=6, knock=2.0, life=60, radius=3)
+CHARGED = dict(hold_frames=36, speed=9.2, damage=30, knock=9.0, life=80, radius=8, pierce=True)
 MELEE = [dict(damage=12, knock=4.0, active=(4, 9), total=16, lunge=3.0, reach=34, hitstop=4),
          dict(damage=14, knock=5.0, active=(4, 9), total=16, lunge=3.5, reach=36, hitstop=5),
          dict(damage=24, knock=10.0, active=(5, 11), total=24, lunge=5.0, reach=42, hitstop=8)]
 MELEE_COMBO_WINDOW = 14
 PLAYER = dict(hp=100, w=20, h=44, iframes=60, hurt_knock=6.0, fall_damage=15, spike_damage=20)
-WALKER = dict(hp=30, w=26, h=30, speed=1.2, charge_speed=4.0, sight=180, contact=10, weight=1.0)
-FLYER  = dict(hp=20, r=13, keep_dist=200, speed=2.0, shoot_cd=110, bullet_speed=3.2, bullet_dmg=10, sight=420, weight=1.4)
-BRUTE  = dict(hp=90, w=40, h=56, speed=0.7, sight=200, range=60, windup=50, strike=10, recover=55,
+WALKER = dict(hp=30, w=26, h=30, speed=1.0, charge_speed=3.3, sight=180, contact=10, weight=1.0)
+FLYER  = dict(hp=20, r=13, keep_dist=200, speed=1.7, shoot_cd=110, bullet_speed=2.7, bullet_dmg=10, sight=420, weight=1.4)
+BRUTE  = dict(hp=90, w=40, h=56, speed=0.6, sight=200, range=60, windup=50, strike=10, recover=55,
               damage=30, contact=12, weight=0.35)
 CAMERA = dict(lerp=0.12, lookahead=90)
 COLORS = dict(bg=(236, 240, 244), tile=(70, 80, 98), oneway=(130, 145, 170), spike=(200, 60, 60),
@@ -623,12 +623,18 @@ async def run():
         for ev in pygame.event.get():
             if ev.type == pygame.QUIT: return g
             if hasattr(g.inp, "handle"): g.inp.handle(ev)
-        g.inp.poll()
-        if g.inp.pressed("quit") and not auto and sys.platform != "emscripten": return g
+        if "quit" in g.inp.cur and not auto and sys.platform != "emscripten": return g
         if getattr(g.inp, "touch_seen", False) and g.frame == 1: pass
         if isinstance(g.inp, TouchInput) and g.inp.touch_seen and g.show_help and not getattr(g, "_hid", False):
             g.show_help = False; g._hid = True  # Hilfe verdeckt sonst Buttons
-        g.update(); g.draw(); draw_touch(screen, g.inp, tfont)
+        # fester Zeitschritt 60 Hz, unabhaengig von 90/120-Hz-Displays
+        if auto: steps = 1
+        else:
+            now = time.perf_counter(); acc = min(getattr(g, "_acc", 0.0) + now - getattr(g, "_last", now), 0.1); g._last = now
+            steps = int(acc * FPS); g._acc = acc - steps / FPS
+        for _ in range(steps):
+            g.inp.poll(); g.update()
+        g.draw(); draw_touch(screen, g.inp, tfont)
         if g.frame % 30 == 0: g._portrait = is_portrait()
         if getattr(g, "_portrait", False):
             screen.fill((20, 20, 30)); t = g.big.render("Bitte quer halten", True, (255, 255, 255))
